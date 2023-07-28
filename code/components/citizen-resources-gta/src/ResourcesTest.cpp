@@ -227,6 +227,13 @@ static InitFunction initFunction([] ()
 				}
 			}
 
+			if (g_gameInit.HasVariable("storyMode") || g_gameInit.HasVariable("localMode"))
+			{
+				// citizen-level-loader-five takes care of map stores and caches for singleplayer. 
+				// Repeating it here causes crashes.
+				return;
+			}
+
 			{
 				auto map = metaData->GetEntries("this_is_a_map");
 

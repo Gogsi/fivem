@@ -332,23 +332,8 @@ struct GetRagePageFlagsExtension
 	rage::ResourceFlags flags; // out
 };
 
-static void LoadAndMountResource(fx::ResourceManager* resourceManager, const std::string& resourceDir)
+static void MountStreamingFiles(fx::ResourceManager* resourceManager, const std::string& resourceDir, const std::string& resourceRoot)
 {
-	auto resourceRoot = "usermaps:/resources/" + resourceDir;
-
-	skyr::url_record record;
-	record.scheme = "file";
-
-	skyr::url url{ std::move(record) };
-	url.set_pathname(resourceRoot);
-	url.set_hash(resourceDir);
-
-	resourceManager->AddResource(url.href())
-	.then([resourceDir, resourceRoot](fwRefContainer<fx::Resource> resource)
-	{
-		resource->Start();
-	});
-
 	// also tag with streaming files, wahoo!
 	// #TODO: make recursive!
 	// #TODO: maybe share this code once it does support recursion?
@@ -407,6 +392,26 @@ static void LoadAndMountResource(fx::ResourceManager* resourceManager, const std
 	}
 }
 
+static void LoadAndMountResource(fx::ResourceManager* resourceManager, const std::string& resourceDir)
+{
+	auto resourceRoot = "usermaps:/resources/" + resourceDir;
+
+	skyr::url_record record;
+	record.scheme = "file";
+
+	skyr::url url{ std::move(record) };
+	url.set_pathname(resourceRoot);
+	url.set_hash(resourceDir);
+
+	resourceManager->AddResource(url.href())
+	.then([resourceDir, resourceRoot](fwRefContainer<fx::Resource> resource)
+	{
+		resource->Start();
+	});
+
+	MountStreamingFiles(resourceManager, resourceDir, resourceRoot);
+}
+
 static void RegisterSPCommands(fx::ResourceManager* resourceManager)
 {
 	static ConsoleCommand localStartCommand("localStart", [resourceManager](const std::string& resourceDir)
@@ -423,6 +428,8 @@ static void RegisterSPCommands(fx::ResourceManager* resourceManager)
 
 			res->Stop();
 			res->Start();
+
+			MountStreamingFiles(resourceManager, resourceDir, "usermaps:/resources/" + resourceDir);
 		});
 
 
