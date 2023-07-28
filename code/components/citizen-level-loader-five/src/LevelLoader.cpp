@@ -308,7 +308,7 @@ public:
 			if (!pathRef.empty() && !fragRef.empty())
 			{
 				std::vector<char> path;
-				std::string pr = pathRef.substr(1);
+				std::string pr = pathRef.substr(1) + "/";
 				// network::uri::decode(pr.begin(), pr.end(), std::back_inserter(path));
 
 				resource = m_manager->CreateResource(fragRef, this);
