@@ -37,8 +37,8 @@ static std::string g_nextLevelPath;
 static bool g_wasLastLevelCustom;
 static bool g_gameUnloaded = false;
 
-static void(*g_origLoadLevelByIndex)(int);
-static void(*g_loadLevel)(const char* levelPath);
+static void (*g_origLoadLevelByIndex)(int);
+static void (*g_loadLevel)(const char* levelPath);
 
 enum NativeIdentifiers : uint64_t
 {
@@ -102,7 +102,7 @@ static void DoLoadLevel(int index)
 	// we're trying to override the level - try finding the level asked for.
 	bool foundLevel = false;
 
-	auto testLevel = [] (const char* path)
+	auto testLevel = [](const char* path)
 	{
 		std::string metaFile = std::string(path) + ".meta";
 
@@ -117,7 +117,7 @@ static void DoLoadLevel(int index)
 	};
 
 	const char* levelPath = nullptr;
-	
+
 	// try hardcoded level name
 	if (g_overrideNextLoadedLevel.find(':') != std::string::npos)
 	{
@@ -157,7 +157,7 @@ static void DoLoadLevel(int index)
 
 	// clear the 'next' level
 	g_overrideNextLoadedLevel.clear();
-	
+
 	// save globally to prevent va() reuse messing up
 	g_nextLevelPath = levelPath;
 
@@ -167,10 +167,10 @@ static void DoLoadLevel(int index)
 
 namespace streaming
 {
-	void DLL_EXPORT SetNextLevelPath(const std::string& path)
-	{
-		g_overrideNextLoadedLevel = path;
-	}
+void DLL_EXPORT SetNextLevelPath(const std::string& path)
+{
+	g_overrideNextLoadedLevel = path;
+}
 }
 
 static bool IsLevelApplicable()
@@ -186,7 +186,7 @@ static bool DoesLevelHashMatch(void* evaluator, uint32_t* hash)
 	return (!g_wasLastLevelCustom);
 }
 
-static HookFunction hookFunction([] ()
+static HookFunction hookFunction([]()
 {
 	char* levelCaller = xbr::IsGameBuildOrGreater<2060>() ? hook::pattern("33 D0 81 E2 FF 00 FF 00 33 D1 48").count(1).get(0).get<char>(0x33) : hook::pattern("0F 94 C2 C1 C1 10 33 CB 03 D3 89 0D").count(1).get(0).get<char>(46);
 	char* levelByIndex = hook::get_call(levelCaller);
@@ -228,7 +228,7 @@ static void LoadLevel(const char* levelName)
 			spawnThread.ResetInityThings();
 		}
 
-		gameInit->LoadGameFirstLaunch([] ()
+		gameInit->LoadGameFirstLaunch([]()
 		{
 			return true;
 		});
@@ -287,7 +287,6 @@ public:
 	SPResourceMounter(fx::ResourceManager* manager)
 		: m_manager(manager)
 	{
-
 	}
 
 	virtual bool HandlesScheme(const std::string& scheme) override
@@ -310,7 +309,7 @@ public:
 			{
 				std::vector<char> path;
 				std::string pr = pathRef.substr(1);
-				//network::uri::decode(pr.begin(), pr.end(), std::back_inserter(path));
+				// network::uri::decode(pr.begin(), pr.end(), std::back_inserter(path));
 
 				resource = m_manager->CreateResource(fragRef, this);
 				resource->LoadFrom(pr);
@@ -333,9 +332,106 @@ struct GetRagePageFlagsExtension
 	rage::ResourceFlags flags; // out
 };
 
-static InitFunction initFunction([] ()
+static void LoadAndMountResource(fx::ResourceManager* resourceManager, const std::string& resourceDir)
 {
-	rage::fiDevice::OnInitialMount.Connect([] ()
+	auto resourceRoot = "usermaps:/resources/" + resourceDir;
+
+	skyr::url_record record;
+	record.scheme = "file";
+
+	skyr::url url{ std::move(record) };
+	url.set_pathname(resourceRoot);
+	url.set_hash(resourceDir);
+
+	resourceManager->AddResource(url.href())
+	.then([resourceDir, resourceRoot](fwRefContainer<fx::Resource> resource)
+	{
+		resource->Start();
+	});
+
+	// also tag with streaming files, wahoo!
+	// #TODO: make recursive!
+	// #TODO: maybe share this code once it does support recursion?
+
+	vfs::FindData findData;
+	auto mount = resourceRoot + "/stream/";
+	auto device = vfs::GetDevice(mount);
+
+	if (device.GetRef())
+	{
+		auto findHandle = device->FindFirst(mount, &findData);
+
+		if (findHandle != INVALID_DEVICE_HANDLE)
+		{
+			bool shouldUseCache = false;
+			bool shouldUseMapStore = false;
+
+			do
+			{
+				if (!(findData.attributes & FILE_ATTRIBUTE_DIRECTORY))
+				{
+					std::string tfn = mount + findData.name;
+
+					GetRagePageFlagsExtension data;
+					data.fileName = tfn.c_str();
+					device->ExtensionCtl(VFS_GET_RAGE_PAGE_FLAGS, &data, sizeof(data));
+
+					CfxCollection_AddStreamingFileByTag(resourceDir, tfn, data.flags);
+
+					if (boost::algorithm::ends_with(tfn, ".ymf"))
+					{
+						shouldUseCache = true;
+					}
+
+					if (boost::algorithm::ends_with(tfn, ".ybn") || boost::algorithm::ends_with(tfn, ".ymap"))
+					{
+						shouldUseMapStore = true;
+					}
+				}
+			} while (device->FindNext(findHandle, &findData));
+
+			device->FindClose(findHandle);
+
+			// in case of .#mf file
+			if (shouldUseCache)
+			{
+				streaming::AddDataFileToLoadList("CFX_PSEUDO_CACHE", resourceDir);
+			}
+
+			// in case of .#bn/.#map file
+			if (shouldUseMapStore)
+			{
+				streaming::AddDataFileToLoadList("CFX_PSEUDO_ENTRY", "RELOAD_MAP_STORE");
+			}
+		}
+	}
+}
+
+static void RegisterSPCommands(fx::ResourceManager* resourceManager)
+{
+	static ConsoleCommand localStartCommand("localStart", [resourceManager](const std::string& resourceDir)
+	{
+		LoadAndMountResource(resourceManager, resourceDir);
+	});
+
+	static ConsoleCommand localRestartCommand("localRestart", [resourceManager]()
+	{
+		resourceManager->ForAllResources([resourceManager](fwRefContainer<fx::Resource> res)
+		{
+			auto resourceDir = res->GetName();
+			res->GetComponent<fx::ResourceMetaDataComponent>()->LoadMetaData(res->GetPath());
+
+			res->Stop();
+			res->Start();
+		});
+
+
+	});
+}
+
+static InitFunction initFunction([]()
+{
+	rage::fiDevice::OnInitialMount.Connect([]()
 	{
 		std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> converter;
 		std::string usermapsPath = converter.to_bytes(MakeRelativeCitPath(L"usermaps/"));
@@ -352,6 +448,20 @@ static InitFunction initFunction([] ()
 	static ConsoleCommand storyModeyCommand("storymode", []()
 	{
 		Instance<ICoreGameInit>::Get()->SetVariable("storyMode");
+
+		LoadLevel("gta5");
+	});
+
+	static ConsoleCommand storyModeyCommand2("storymode", [](const std::string& resourceDir)
+	{
+		fx::ResourceManager* resourceManager = Instance<fx::ResourceManager>::Get();
+		resourceManager->AddMounter(new SPResourceMounter(resourceManager));
+
+		Instance<ICoreGameInit>::Get()->SetVariable("storyMode");
+
+		LoadAndMountResource(resourceManager, resourceDir);
+		RegisterSPCommands(resourceManager);
+
 		LoadLevel("gta5");
 	});
 
@@ -359,96 +469,20 @@ static InitFunction initFunction([] ()
 	{
 		Instance<ICoreGameInit>::Get()->SetVariable("localMode");
 		Instance<ICoreGameInit>::Get()->SetVariable("editorMode");
+
 		LoadLevel("gta5");
 	});
 
 	static ConsoleCommand localGameCommand("localGame", [](const std::string& resourceDir)
 	{
-		Instance<ICoreGameInit>::Get()->SetVariable("localMode");
-		Instance<ICoreGameInit>::Get()->SetData("localResource", resourceDir);
-
 		fx::ResourceManager* resourceManager = Instance<fx::ResourceManager>::Get();
 		resourceManager->AddMounter(new SPResourceMounter(resourceManager));
 
-		auto resourceRoot = "usermaps:/resources/" + resourceDir;
+		Instance<ICoreGameInit>::Get()->SetVariable("localMode");
+		Instance<ICoreGameInit>::Get()->SetData("localResource", resourceDir);
 
-		skyr::url_record record;
-		record.scheme = "file";
-
-		skyr::url url{ std::move(record) };
-		url.set_pathname(resourceRoot);
-		url.set_hash(resourceDir);
-
-		resourceManager->AddResource(url.href())
-			.then([resourceDir, resourceRoot](fwRefContainer<fx::Resource> resource)
-		{
-			resource->Start();
-		});
-
-		// also tag with streaming files, wahoo!
-		// #TODO: make recursive!
-		// #TODO: maybe share this code once it does support recursion?
-		vfs::FindData findData;
-		auto mount = resourceRoot + "/stream/";
-		auto device = vfs::GetDevice(mount);
-
-		if (device.GetRef())
-		{
-			auto findHandle = device->FindFirst(mount, &findData);
-
-			if (findHandle != INVALID_DEVICE_HANDLE)
-			{
-				bool shouldUseCache = false;
-				bool shouldUseMapStore = false;
-
-				do
-				{
-					if (!(findData.attributes & FILE_ATTRIBUTE_DIRECTORY))
-					{
-						std::string tfn = mount + findData.name;
-
-						GetRagePageFlagsExtension data;
-						data.fileName = tfn.c_str();
-						device->ExtensionCtl(VFS_GET_RAGE_PAGE_FLAGS, &data, sizeof(data));
-
-						CfxCollection_AddStreamingFileByTag(resourceDir, tfn, data.flags);
-
-						if (boost::algorithm::ends_with(tfn, ".ymf"))
-						{
-							shouldUseCache = true;
-						}
-
-						if (boost::algorithm::ends_with(tfn, ".ybn") || boost::algorithm::ends_with(tfn, ".ymap"))
-						{
-							shouldUseMapStore = true;
-						}
-					}
-				} while (device->FindNext(findHandle, &findData));
-
-				device->FindClose(findHandle);
-
-				// in case of .#mf file
-				if (shouldUseCache)
-				{
-					streaming::AddDataFileToLoadList("CFX_PSEUDO_CACHE", resourceDir);
-				}
-
-				// in case of .#bn/.#map file
-				if (shouldUseMapStore)
-				{
-					streaming::AddDataFileToLoadList("CFX_PSEUDO_ENTRY", "RELOAD_MAP_STORE");
-				}
-			}
-		}
-
-		static ConsoleCommand localRestartCommand("localRestart", [resourceRoot, resourceDir, resourceManager]()
-		{
-			auto res = resourceManager->GetResource(resourceDir);
-			res->GetComponent<fx::ResourceMetaDataComponent>()->LoadMetaData(resourceRoot);
-
-			res->Stop();
-			res->Start();
-		});
+		LoadAndMountResource(resourceManager, resourceDir);
+		RegisterSPCommands(resourceManager);
 
 		LoadLevel("gta5");
 	});
@@ -458,10 +492,11 @@ static InitFunction initFunction([] ()
 		LoadLevel(level.c_str());
 	});
 
-	rage::scrEngine::OnScriptInit.Connect([] ()
+	rage::scrEngine::OnScriptInit.Connect([]()
 	{
 		rage::scrEngine::CreateThread(&spawnThread);
-	}, INT32_MAX);
+	},
+	INT32_MAX);
 
 	Instance<ICoreGameInit>::Get()->OnGameRequestLoad.Connect([]()
 	{
@@ -478,5 +513,6 @@ static InitFunction initFunction([] ()
 		}
 
 		g_gameUnloaded = true;
-	}, INT32_MAX);
+	},
+	INT32_MAX);
 });
